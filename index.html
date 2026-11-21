@@ -1039,7 +1039,9 @@ window.PHOTO_DATA = [
     const cv = document.createElement('canvas');
     host.innerHTML = '';
     host.appendChild(cv);
-    const ctx = cv.getContext('2d');
+    const mainCtx = cv.getContext('2d');
+    let ctx = mainCtx;
+    const oc = document.createElement('canvas'), octx = oc.getContext('2d');   /* offscreen: the slice, so bites can be cut out of it */
     let W = 360, H = 460;
 
     function resize() {
@@ -1048,6 +1050,7 @@ window.PHOTO_DATA = [
       cv.width = W * dpr; cv.height = H * dpr;
       cv.style.width = W + 'px'; cv.style.height = H + 'px';
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      oc.width = cv.width; oc.height = cv.height; octx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
     resize();
     window.addEventListener('resize', resize);
@@ -1199,11 +1202,17 @@ window.PHOTO_DATA = [
     let mode = 'idle', flyStart = 0, cutStart = 0, cutFrom = [0, 0, 0], doneAt = 0, serveStart = 0;
     let hintEl = document.getElementById('cutHint');
     let dragging = false, dragPos = [0, 0, 0];
+    /* ---- eating: tap the served slice 3 times -> bites of 30% / 30% / 40% ---- */
+    const BITE_S = [0, Math.sqrt(0.3), Math.sqrt(0.6), 1.5];   /* how far along the slice (tip -> crust) is eaten; area grows with s^2 */
+    const BITE_T = 700;
+    let bites = 0, biting = false, biteStart = 0, lastSlice = null, biteHinted = false;
 
     function setHint(on) { if (hintEl) hintEl.classList.toggle('on', on); }
 
     window.knifeGo3d = () => {
       mode = 'fly'; flyStart = performance.now(); setHint(false);
+      bites = 0; biting = false; biteHinted = false; lastSlice = null;
+      if (hintEl) hintEl.textContent = 'কেক কাটার জন্য ছুরিটা ধরে কেকের উপরে নিয়ে যাও';
       setTimeout(() => { if (mode === 'fly') { mode = 'rest'; setHint(true); } }, 1200);
     };
 
@@ -1264,6 +1273,14 @@ window.PHOTO_DATA = [
     function pointerXY(e) { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
 
     cv.addEventListener('pointerdown', e => {
+      if (mode === 'served') {
+        if (biting || bites >= 3 || !lastSlice) return;
+        const [px, py] = pointerXY(e), m = lastSlice.mid;
+        if (Math.hypot(px - m[0], py - m[1]) > lastSlice.len * 0.75 + 40) return;
+        biting = true; biteStart = performance.now(); setHint(false);
+        setTimeout(sfxClick, BITE_T * 0.45);
+        return;
+      }
       if (mode !== 'rest') return;
       const [px, py] = pointerXY(e), k = knifeScreenPos();
       if (Math.hypot(px - k[0], py - k[1]) > 90) return;
@@ -1310,7 +1327,7 @@ window.PHOTO_DATA = [
 
       const spin = 0;   /* fixed: the cake stands still, slice facing the very front */
       const cakeTf = { yaw: spin };
-      const list = [], bg = [];
+      const list = [], bg = [], plateL = [];
       const el = mode === 'cut' ? now - cutStart : 0;
       const cutDone = mode === 'cut' && el >= CUT_T;
       const sliceVisible = cutDone || mode === 'done' || mode === 'serve' || mode === 'served';
@@ -1332,9 +1349,10 @@ window.PHOTO_DATA = [
         let pTf = {};
         if (mode === 'cut') { const pe = easeIO(Math.min(1, Math.max(0, (el - CUT_T) / 450))); pTf = { t: [0, -0.55 * (1 - pe), 0] }; }
         if (serving) pTf = { t: [SERVE_D[0] * serveE, SERVE_D[1] * serveE, SERVE_D[2] * serveE] };
-        collectFaces(list, PLATE_SMALL, pTf);
+        collectFaces(plateL, PLATE_SMALL, pTf);
       }
 
+      let sliceTfFinal = null;
       if (sliceVisible) {
         let sliceTf = { yaw: spin };
         if (mode === 'cut') {
@@ -1360,6 +1378,7 @@ window.PHOTO_DATA = [
           const t0 = sliceTf.t || [0, 0, 0];
           sliceTf = { yaw: Y, t: [bc[0] + t0[0] - rc[0], t0[1], bc[2] + t0[2] - rc[2]] };
         }
+        sliceTfFinal = sliceTf;
         collectFaces(list, SLICE, sliceTf);
         collectBerries(list, sliceTf, true);
       }
@@ -1414,9 +1433,8 @@ window.PHOTO_DATA = [
       bg.sort((a, b) => b.z - a.z);
       list.sort((a, b) => b.z - a.z);
       if (serving) {
-        /* main cake goes blurry into the background, the slice stays sharp in front */
+        /* main cake softly fades into the background (no canvas blur filter: it was very slow), the slice stays sharp in front */
         ctx.save();
-        ctx.filter = 'blur(4px)';
         ctx.globalAlpha = 0.8;
         bg.forEach(item => item.draw());
         ctx.restore();
@@ -1426,9 +1444,58 @@ window.PHOTO_DATA = [
         grd.addColorStop(1, 'rgba(255,255,255,0)');
         ctx.fillStyle = grd;
         ctx.fillRect(0, 0, W, H);
-        list.forEach(item => item.draw());
+        plateL.sort((a, b) => b.z - a.z);
+        plateL.forEach(item => item.draw());
+
+        /* bites */
+        let sCur = BITE_S[bites];
+        if (mode === 'served' && biting) {
+          const pr = Math.min(1, (now - biteStart) / BITE_T);
+          sCur = BITE_S[bites] + (BITE_S[bites + 1] - BITE_S[bites]) * easeIO(pr);
+          if (pr >= 1) { bites++; biting = false; sCur = BITE_S[bites]; if (bites >= 3 && hintEl) { hintEl.textContent = 'ইয়াম্মি! 😋 কেক শেষ!'; setHint(true); } }
+        }
+        let tip = null, arc = null, wFull = 0;
+        if (sliceTfFinal) {
+          const P = q => project(toView(xf(q, sliceTfFinal, true)));
+          tip = P([0, 0.9, 0]); arc = P([0, 0.9, 2.6]);
+          const e1 = P([2.6 * Math.cos(A0), 0.9, 2.6 * Math.sin(A0)]), e2 = P([2.6 * Math.cos(A1), 0.9, 2.6 * Math.sin(A1)]);
+          wFull = Math.hypot(e1[0] - e2[0], e1[1] - e2[1]);
+          lastSlice = { mid: [(tip[0] + arc[0]) / 2, (tip[1] + arc[1]) / 2], len: Math.hypot(arc[0] - tip[0], arc[1] - tip[1]) };
+        }
+        if (mode === 'served' && !biteHinted) { biteHinted = true; if (hintEl) { hintEl.textContent = 'কেক খাওয়ার জন্য কেকের উপর ট্যাপ করো 👆'; setHint(true); } }
+        if (sCur < 1.4) {
+          list.sort((a, b) => b.z - a.z);
+          if (sCur <= 0 || !tip) {
+            list.forEach(item => item.draw());
+          } else {
+            /* draw the slice offscreen, scoop the eaten part out with round bite marks, then paste it */
+            ctx = octx; octx.clearRect(0, 0, W, H);
+            list.forEach(item => item.draw());
+            ctx = mainCtx;
+            const dx = arc[0] - tip[0], dy = arc[1] - tip[1], L = Math.hypot(dx, dy) || 1;
+            const wb = wFull * Math.min(sCur, 1) + 6, r = wb * 0.42 + 8, bx = sCur * L - r * 0.5;
+            octx.save();
+            octx.translate(tip[0], tip[1]); octx.rotate(Math.atan2(dy, dx));
+            octx.globalCompositeOperation = 'destination-out'; octx.fillStyle = '#000';
+            octx.fillRect(-W * 2, -H * 2, bx + W * 2, H * 4);
+            [-0.38, 0, 0.38].forEach(k => { octx.beginPath(); octx.arc(bx, k * wb, r, 0, Math.PI * 2); octx.fill(); });
+            octx.restore();
+            mainCtx.save(); mainCtx.setTransform(1, 0, 0, 1, 0, 0); mainCtx.drawImage(oc, 0, 0); mainCtx.restore();
+          }
+          /* tap indicator: pulsing ring + finger on the slice */
+          if (mode === 'served' && !biting && bites < 3 && lastSlice) {
+            const m = lastSlice.mid, k = 0.5 + 0.5 * Math.sin(now / 260);
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255,255,255,' + (0.9 - 0.5 * k) + ')'; ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.arc(m[0], m[1], 20 + 14 * k, 0, Math.PI * 2); ctx.stroke();
+            ctx.font = '30px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText('\u{1F446}', m[0] + 6, m[1] + 30 + 6 * k);
+            ctx.restore();
+          }
+        }
       } else {
-        const all = bg.concat(list);
+        const all = bg.concat(list, plateL);
         all.sort((a, b) => b.z - a.z);
         all.forEach(item => item.draw());
       }
